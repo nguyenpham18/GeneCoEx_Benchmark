@@ -11,10 +11,11 @@ def calculate_proportionality(df):
     - Columns: Samples
     """
     
-    # 1. Zero Handling: Warn and skip (replace with NaN)
+    # 1. Zero Handling: The Pseudo-Count Method
     if (df == 0).any().any():
-        warnings.warn("Zeros detected in the expression matrix. They will be replaced with NaN and skipped in calculations.", UserWarning)
-        df = df.replace(0, np.nan)
+        warnings.warn("Zeros detected. Applying a pseudo-count of 1 to the entire matrix to allow log transformation.", UserWarning)
+        # Add 1 to everything to preserve matrix integrity
+        df = df + 1
         
     # 2. Centered Log-Ratio (CLR) Transformation
     # We take the natural log of the dataframe.
