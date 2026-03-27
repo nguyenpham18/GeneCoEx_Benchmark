@@ -132,9 +132,9 @@ def save_similarity_matrix(corr: pd.DataFrame, output_path: str | Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Phase 2: compute Pearson gene-gene similarity matrix."
+        description=" compute Pearson gene-gene similarity matrix."
     )
-    parser.add_argument("--input", required=True, help="Path to cleaned expression matrix (output of Phase 1).")
+    parser.add_argument("--input", required=True, help="Path to cleaned expression matrix.")
     parser.add_argument("--output", required=True, help="Path to save the Pearson similarity matrix.")
     parser.add_argument("--sep", default=None, help="Column separator for text files (default: inferred from extension).")
 
