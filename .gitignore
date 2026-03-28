@@ -1,1 +1,13 @@
 .DS_Store
+
+data/raw/
+data/processed/
+data/similarity/
+data/annotation/
+
+# Output figures
+results/
+
+!data/raw/.gitkeep
+!data/annotation/.gitkeep
+
