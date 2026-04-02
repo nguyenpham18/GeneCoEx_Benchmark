@@ -106,7 +106,7 @@ def compute_pearson_similarity(
     np.fill_diagonal(corr_array, 1.0)
     np.clip(corr_array, -1.0, 1.0, out=corr_array)
  
-    return pd.DataFrame(corr_array.astype(np.float64), index=genes, columns=genes)
+    return pd.DataFrame(corr_array, index=genes, columns=genes)
  
  
 def summarize_similarity(corr: pd.DataFrame) -> dict:
