@@ -67,18 +67,46 @@ def clean_expression_matrix(expr: pd.DataFrame) -> pd.DataFrame:
     return expr
  
  
-def compute_pearson_similarity(expr: pd.DataFrame, min_periods: int = 3) -> pd.DataFrame:
-    logger.info("Computing Pearson correlation for %d genes...", expr.shape[0])
+def compute_pearson_similarity(
+    expr: pd.DataFrame,
+    min_periods: int = 3,
+    chunk_size: int = 2000,
+) -> pd.DataFrame:
+    """Compute gene-gene Pearson correlation in chunks to avoid memory errors.
  
-    # Transpose so genes become columns, as required by .corr()
-    corr = expr.T.corr(method="pearson", min_periods=min_periods)
+    Instead of building the full n x n matrix at once (which needs ~2.3 GB
+    for 17578 genes), this computes chunk_size rows at a time.
+    Peak memory per chunk ~ chunk_size x n_genes x 8 bytes (~270 MB at default).
+    """
+    logger.info("Computing Pearson correlation for %d genes (chunk_size=%d)...",
+                expr.shape[0], chunk_size)
  
-    # Guard against floating-point drift on the diagonal
-    corr_array = corr.to_numpy().copy()
+    genes     = expr.index.tolist()
+    n         = len(genes)
+    expr_vals = expr.values.astype(np.float64)
+ 
+    # Pre-standardize each gene across samples (mean=0, std=1)
+    means = expr_vals.mean(axis=1, keepdims=True)
+    stds  = expr_vals.std(axis=1, ddof=1, keepdims=True)
+    stds[stds == 0] = np.nan          # zero-variance genes -> NaN correlations
+    expr_std = (expr_vals - means) / stds
+ 
+    n_samples = expr_vals.shape[1]
+    n_chunks  = (n + chunk_size - 1) // chunk_size
+ 
+    # Allocate output in float32 to halve peak memory usage
+    corr_array = np.full((n, n), np.nan, dtype=np.float32)
+ 
+    for i, start in enumerate(range(0, n, chunk_size)):
+        end        = min(start + chunk_size, n)
+        chunk_corr = np.dot(expr_std[start:end], expr_std.T) / (n_samples - 1)
+        corr_array[start:end, :] = chunk_corr.astype(np.float32)
+        logger.info("  Chunk %d/%d complete (genes %d-%d)", i + 1, n_chunks, start, end)
+ 
     np.fill_diagonal(corr_array, 1.0)
-    corr = pd.DataFrame(corr_array, index=corr.index, columns=corr.columns)
+    np.clip(corr_array, -1.0, 1.0, out=corr_array)
  
-    return corr
+    return pd.DataFrame(corr_array.astype(np.float64), index=genes, columns=genes)
  
  
 def summarize_similarity(corr: pd.DataFrame) -> dict:
