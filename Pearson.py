@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
+from scipy.sparse import save_npz
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INPUT = "data/processed/preprocessed_counts.csv"
 DEFAULT_SIMILARITY = "data/similarity/pearson_similarity.parquet"
 DEFAULT_OUTPUT_SOFT = "data/processed/adjacency_soft.parquet"
-DEFAULT_OUTPUT_HARD = "data/processed/adjacency_hard.parquet"
+DEFAULT_OUTPUT_HARD = "data/processed/adjacency_hard.npz"
 
 
 def load_expression_matrix(path: str | Path) -> pd.DataFrame:
@@ -65,7 +67,11 @@ def clean_expression_matrix(expr: pd.DataFrame) -> pd.DataFrame:
     return expr
 
 
-def compute_pearson_similarity(expr: pd.DataFrame, min_periods: int = 3, chunk_size: int = 2000) -> pd.DataFrame:
+def compute_pearson_similarity(
+    expr: pd.DataFrame,
+    min_periods: int = 3,
+    chunk_size: int = 2000,
+) -> pd.DataFrame:
     logger.info(
         "Computing Pearson correlation for %d genes (chunk_size=%d)...",
         expr.shape[0],
@@ -150,68 +156,63 @@ def soft_threshold(corr: pd.DataFrame, beta: int, chunk_size: int = 2000) -> pd.
     return pd.DataFrame(arr, index=genes, columns=genes)
 
 
-def hard_threshold(corr: pd.DataFrame, tau: float, chunk_size: int = 2000) -> pd.DataFrame:
+def hard_threshold(corr: pd.DataFrame, tau: float) -> sparse.csr_matrix:
     logger.info("Applying hard thresholding (tau=%.3f).", tau)
 
-    genes = corr.index.tolist()
-    n = len(genes)
-    n_chunks = (n + chunk_size - 1) // chunk_size
-    arr = np.zeros((n, n), dtype=np.float32)
+    arr = np.abs(corr.to_numpy(dtype=np.float32, copy=False))
+    mask = arr >= tau
+    np.fill_diagonal(mask, False)
 
-    for i, start in enumerate(range(0, n, chunk_size)):
-        end = min(start + chunk_size, n)
-        chunk = np.abs(corr.iloc[start:end].to_numpy(dtype=np.float32, copy=True))
-        arr[start:end, :] = (chunk >= tau).astype(np.float32)
-        logger.info("  Chunk %d/%d complete (genes %d-%d)", i + 1, n_chunks, start, end)
-
-    np.fill_diagonal(arr, 0.0)
-    return pd.DataFrame(arr, index=genes, columns=genes)
+    return sparse.csr_matrix(mask.astype(np.uint8))
 
 
-def summarize_adjacency(adj: pd.DataFrame, method: str) -> dict:
+def summarize_soft_adjacency(adj: pd.DataFrame) -> dict:
     arr = adj.to_numpy(dtype=np.float32, copy=False)
     n = arr.shape[0]
+    count = 0
+    sum_w = 0.0
+    min_w = np.inf
+    max_w = -np.inf
+    above_01 = 0
+    above_05 = 0
+
+    for i in range(n - 1):
+        row = arr[i, i + 1:]
+        count += int(row.size)
+        sum_w += float(row.sum(dtype=np.float64))
+        min_w = min(min_w, float(row.min()))
+        max_w = max(max_w, float(row.max()))
+        above_01 += int(np.count_nonzero(row > 0.1))
+        above_05 += int(np.count_nonzero(row > 0.5))
+
+    return {
+        "method": "soft",
+        "num_genes": int(n),
+        "num_pairs": int(count),
+        "mean_edge_weight": float(sum_w / count) if count else float("nan"),
+        "min_edge_weight": float(min_w) if count else float("nan"),
+        "max_edge_weight": float(max_w) if count else float("nan"),
+        "edges_above_0.1": int(above_01),
+        "edges_above_0.5": int(above_05),
+        "pct_strong_edges": float(100 * above_05 / count) if count else float("nan"),
+    }
+
+
+def summarize_hard_adjacency(adj_sparse: sparse.csr_matrix) -> dict:
+    n = adj_sparse.shape[0]
     total_possible_edges = n * (n - 1) // 2
 
-    if method == "soft":
-        count = 0
-        sum_w = 0.0
-        min_w = np.inf
-        max_w = -np.inf
-        above_01 = 0
-        above_05 = 0
+    num_edges = int(adj_sparse.nnz // 2)
+    density = float(num_edges / total_possible_edges) if total_possible_edges else float("nan")
 
-        for i in range(n - 1):
-            row = arr[i, i + 1:]
-            count += int(row.size)
-            sum_w += float(row.sum(dtype=np.float64))
-            min_w = min(min_w, float(row.min()))
-            max_w = max(max_w, float(row.max()))
-            above_01 += int(np.count_nonzero(row > 0.1))
-            above_05 += int(np.count_nonzero(row > 0.5))
-
-        return {
-            "method": "soft",
-            "num_genes": int(n),
-            "num_pairs": int(count),
-            "mean_edge_weight": float(sum_w / count) if count else float("nan"),
-            "min_edge_weight": float(min_w) if count else float("nan"),
-            "max_edge_weight": float(max_w) if count else float("nan"),
-            "edges_above_0.1": int(above_01),
-            "edges_above_0.5": int(above_05),
-            "pct_strong_edges": float(100 * above_05 / count) if count else float("nan"),
-        }
-
-    degree = arr.sum(axis=1)
-    n_edges = int(degree.sum() / 2)
-    isolated = int(np.count_nonzero(degree == 0))
-    density = float(n_edges / total_possible_edges) if total_possible_edges else float("nan")
+    degree = np.asarray(adj_sparse.sum(axis=1)).ravel()
+    isolated = int(np.sum(degree == 0))
 
     return {
         "method": "hard",
         "num_genes": int(n),
         "total_possible_edges": int(total_possible_edges),
-        "num_edges": int(n_edges),
+        "num_edges": int(num_edges),
         "network_density": round(density, 6),
         "mean_degree": round(float(np.mean(degree)), 4),
         "max_degree": float(np.max(degree)),
@@ -220,10 +221,17 @@ def summarize_adjacency(adj: pd.DataFrame, method: str) -> dict:
     }
 
 
-def save_matrix(matrix: pd.DataFrame, output_path: str | Path, label: str) -> None:
+def save_matrix(matrix, output_path: str | Path, label: str) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     suffix = output_path.suffix.lower()
+
+    if isinstance(matrix, sparse.spmatrix):
+        if suffix != ".npz":
+            output_path = output_path.with_suffix(".npz")
+        save_npz(output_path, matrix)
+        logger.info("Saved %s to: %s", label, output_path)
+        return
 
     if suffix == ".parquet":
         matrix.to_parquet(output_path)
@@ -273,7 +281,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=None,
-        help="Output path for adjacency matrix. Defaults to data/processed/adjacency_soft/hard.parquet.",
+        help="Output path for adjacency matrix. Defaults to data/processed/adjacency_soft.parquet or adjacency_hard.npz.",
     )
 
     args = parser.parse_args()
@@ -284,8 +292,10 @@ def main() -> None:
         logger.info("--skip-similarity set and file exists. Loading saved similarity matrix.")
         if sim_path.suffix.lower() == ".parquet":
             corr = pd.read_parquet(sim_path)
-        else:
+        elif sim_path.suffix.lower() == ".csv":
             corr = pd.read_csv(sim_path, index_col=0)
+        else:
+            raise ValueError(f"Unsupported similarity format: {sim_path.suffix}")
         logger.info("Loaded similarity matrix: %d x %d", corr.shape[0], corr.shape[1])
     else:
         expr = load_expression_matrix(args.input)
@@ -305,18 +315,20 @@ def main() -> None:
 
     if args.soft:
         adj = soft_threshold(corr, beta=args.beta)
-        adj_summary = summarize_adjacency(adj, method="soft")
+        adj_summary = summarize_soft_adjacency(adj)
         output_path = args.output or DEFAULT_OUTPUT_SOFT
+        logger.info("--- Adjacency Summary ---")
+        for key, value in adj_summary.items():
+            logger.info("  %s: %s", key, value)
+        save_matrix(adj, output_path, "adjacency matrix")
     else:
-        adj = hard_threshold(corr, tau=args.tau)
-        adj_summary = summarize_adjacency(adj, method="hard")
+        adj_sparse = hard_threshold(corr, tau=args.tau)
+        adj_summary = summarize_hard_adjacency(adj_sparse)
         output_path = args.output or DEFAULT_OUTPUT_HARD
-
-    logger.info("--- Adjacency Summary ---")
-    for key, value in adj_summary.items():
-        logger.info("  %s: %s", key, value)
-
-    save_matrix(adj, output_path, "adjacency matrix")
+        logger.info("--- Adjacency Summary ---")
+        for key, value in adj_summary.items():
+            logger.info("  %s: %s", key, value)
+        save_matrix(adj_sparse, output_path, "adjacency matrix")
 
 
 if __name__ == "__main__":
