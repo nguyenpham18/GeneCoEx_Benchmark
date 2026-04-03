@@ -26,8 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
  
 # ── Default paths matching the project structure ──────────────────────────────
-DEFAULT_INPUT      = "data/processed/preprocessed_counts.csv"
-DEFAULT_SIMILARITY = "data/similarity/pearson_similarity.parquet"
+DEFAULT_INPUT       = "data/processed/preprocessed_counts.csv"
+DEFAULT_SIMILARITY  = "data/similarity/pearson_similarity.parquet"
 DEFAULT_OUTPUT_SOFT = "data/processed/adjacency_soft.parquet"
 DEFAULT_OUTPUT_HARD = "data/processed/adjacency_hard.parquet"
  
@@ -115,49 +115,67 @@ def summarize_similarity(corr: pd.DataFrame) -> dict:
     valid  = tri[~np.isnan(tri)]
  
     return {
-        "num_genes":         int(corr.shape[0]),
-        "num_pairs_total":   int(len(tri)),
-        "num_pairs_nan":     int(np.isnan(tri).sum()),
-        "num_pairs_valid":   int(len(valid)),
-        "mean_correlation":  float(np.mean(valid)),
-        "median_correlation":float(np.median(valid)),
-        "min_correlation":   float(np.min(valid)),
-        "max_correlation":   float(np.max(valid)),
+        "num_genes":          int(corr.shape[0]),
+        "num_pairs_total":    int(len(tri)),
+        "num_pairs_nan":      int(np.isnan(tri).sum()),
+        "num_pairs_valid":    int(len(valid)),
+        "mean_correlation":   float(np.mean(valid)),
+        "median_correlation": float(np.median(valid)),
+        "min_correlation":    float(np.min(valid)),
+        "max_correlation":    float(np.max(valid)),
     }
  
  
 # ── Phase 3: Adjacency construction ──────────────────────────────────────────
  
-def soft_threshold(corr: pd.DataFrame, beta: int) -> pd.DataFrame:
+def soft_threshold(corr: pd.DataFrame, beta: int, chunk_size: int = 2000) -> pd.DataFrame:
     """Soft thresholding: Aij = |sij|^beta.
  
     Keeps all edges but raises them to a power. Weak correlations fade
     toward zero, strong ones stay strong. Produces a weighted matrix.
     Beta is typically chosen between 6 and 12.
+    Processed in chunks to avoid memory errors on large matrices.
     """
     logger.info("Applying soft thresholding (beta=%d).", beta)
  
-    arr = np.abs(corr.to_numpy().copy())  # unsigned: drop sign, keep strength
-    arr = np.power(arr, beta)             # raise every value to the power beta
+    genes    = corr.index.tolist()
+    n        = len(genes)
+    n_chunks = (n + chunk_size - 1) // chunk_size
+    arr      = np.zeros((n, n), dtype=np.float32)
+ 
+    for i, start in enumerate(range(0, n, chunk_size)):
+        end   = min(start + chunk_size, n)
+        chunk = np.abs(corr.iloc[start:end].to_numpy().astype(np.float32))
+        arr[start:end, :] = np.power(chunk, beta).astype(np.float32)
+        logger.info("  Chunk %d/%d complete (genes %d-%d)", i + 1, n_chunks, start, end)
+ 
     np.fill_diagonal(arr, 0.0)            # no self-connections in adjacency
+    return pd.DataFrame(arr, index=genes, columns=genes)
  
-    return pd.DataFrame(arr, index=corr.index, columns=corr.columns)
  
- 
-def hard_threshold(corr: pd.DataFrame, tau: float) -> pd.DataFrame:
+def hard_threshold(corr: pd.DataFrame, tau: float, chunk_size: int = 2000) -> pd.DataFrame:
     """Hard thresholding: Aij = 1 if |sij| >= tau, else 0.
  
     Applies a firm cutoff. Pairs at or above tau become 1 (connected),
     everything below becomes 0. Produces a binary matrix.
     Tau is typically chosen between 0.5 and 0.9.
+    Processed in chunks to avoid memory errors on large matrices.
     """
     logger.info("Applying hard thresholding (tau=%.3f).", tau)
  
-    arr = np.abs(corr.to_numpy().copy())  # unsigned: drop sign, keep strength
-    arr = (arr >= tau).astype(float)      # 1.0 if above threshold, 0.0 if below
-    np.fill_diagonal(arr, 0.0)            # no self-connections in adjacency
+    genes    = corr.index.tolist()
+    n        = len(genes)
+    n_chunks = (n + chunk_size - 1) // chunk_size
+    arr      = np.zeros((n, n), dtype=np.float32)
  
-    return pd.DataFrame(arr, index=corr.index, columns=corr.columns)
+    for i, start in enumerate(range(0, n, chunk_size)):
+        end   = min(start + chunk_size, n)
+        chunk = np.abs(corr.iloc[start:end].to_numpy().astype(np.float32))
+        arr[start:end, :] = (chunk >= tau).astype(np.float32)
+        logger.info("  Chunk %d/%d complete (genes %d-%d)", i + 1, n_chunks, start, end)
+ 
+    np.fill_diagonal(arr, 0.0)            # no self-connections in adjacency
+    return pd.DataFrame(arr, index=genes, columns=genes)
  
  
 def summarize_adjacency(adj: pd.DataFrame, method: str) -> dict:
@@ -222,11 +240,22 @@ def main() -> None:
     )
  
     # Phase 2 args
-    parser.add_argument("--input",      default=DEFAULT_INPUT,      help=f"Expression matrix path (default: {DEFAULT_INPUT}).")
-    parser.add_argument("--similarity", default=DEFAULT_SIMILARITY, help=f"Where to save/load similarity matrix (default: {DEFAULT_SIMILARITY}).")
-    parser.add_argument("--min-periods",type=int, default=3,        help="Min overlapping values per gene pair (default: 3).")
-    parser.add_argument("--skip-similarity", action="store_true",
-                        help="Skip recomputing similarity if the file already exists.")
+    parser.add_argument(
+        "--input", default=DEFAULT_INPUT,
+        help=f"Path to expression matrix (default: {DEFAULT_INPUT}).",
+    )
+    parser.add_argument(
+        "--similarity", default=DEFAULT_SIMILARITY,
+        help=f"Path to save/load similarity matrix (default: {DEFAULT_SIMILARITY}).",
+    )
+    parser.add_argument(
+        "--min-periods", type=int, default=3,
+        help="Min overlapping values per gene pair (default: 3).",
+    )
+    parser.add_argument(
+        "--skip-similarity", action="store_true",
+        help="Skip recomputing similarity if the file already exists.",
+    )
  
     # Phase 3 args
     method_group = parser.add_mutually_exclusive_group(required=True)
@@ -235,8 +264,10 @@ def main() -> None:
  
     parser.add_argument("--beta", type=int,   default=6,   help="Power for soft thresholding (default: 6).")
     parser.add_argument("--tau",  type=float, default=0.7, help="Cutoff for hard thresholding (default: 0.7).")
-    parser.add_argument("--output", default=None,
-                        help="Output path for adjacency matrix. Defaults to data/processed/adjacency_soft/hard.parquet.")
+    parser.add_argument(
+        "--output", default=None,
+        help="Output path for adjacency matrix. Defaults to data/processed/adjacency_soft/hard.parquet.",
+    )
  
     args = parser.parse_args()
  
@@ -278,6 +309,10 @@ def main() -> None:
         logger.info("  %s: %s", key, value)
  
     save_matrix(adj, output_path, "adjacency matrix")
+ 
+ 
+if __name__ == "__main__":
+    main()
  
  
 if __name__ == "__main__":
