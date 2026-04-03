@@ -1,140 +1,474 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+"""
+Similarity matrix visualization for gene co-expression benchmarking.
+Modular design — accepts any similarity matrix as input.
+
+Usage:
+    python src/visualization_similarity.py \
+        --input data/similarity/pearson_similarity.csv \
+        --name Pearson \
+        --output results/figures/pearson
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
 from pathlib import Path
 
-# ── Paths ──────────────────────────────────────────────
-PEARSON  = "data/similarity/pearson_similarity.csv"
-OUT_DIR  = "results/figures/pearson"
-Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import seaborn as sns
+from scipy import stats
 
-print("Loading matrix...")
-df = pd.read_csv(PEARSON, index_col=0)
-vals = df.values
-tri = vals[np.triu_indices_from(vals, k=1)]
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-# ══════════════════════════════════════════════════════
-# Figure 1: Distribution of All Pairwise Correlations
-# ══════════════════════════════════════════════════════
-fig, ax = plt.subplots(figsize=(8, 5))
-ax.hist(tri, bins=100, color="#4C72B0", edgecolor="none", alpha=0.85)
-ax.axvline(np.mean(tri),   color="red",    linestyle="--", linewidth=1.5, label=f"Mean = {np.mean(tri):.3f}")
-ax.axvline(np.median(tri), color="orange", linestyle="--", linewidth=1.5, label=f"Median = {np.median(tri):.3f}")
-ax.set_xlabel("Pearson Correlation", fontsize=12)
-ax.set_ylabel("Number of Gene Pairs", fontsize=12)
-ax.set_title("Distribution of All Pairwise Correlations\nGTEx Brain Cortex — 17,578 genes × 125 samples", fontsize=13)
-ax.legend(fontsize=10)
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x/1e6)}M"))
-plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/fig1_distribution_all.png", dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved fig1_distribution_all.png")
+# ── Shared style ───────────────────────────────────────
+NAVY  = "#1B2A4A"
+TEAL  = "#0D9488"
+SLATE = "#64748B"
+RED   = "#EF4444"
+AMBER = "#F59E0B"
+GREEN = "#10B981"
+
 
 # ══════════════════════════════════════════════════════
-# Figure 2: Distribution of Positive Correlations
+# LOAD
 # ══════════════════════════════════════════════════════
-fig, ax = plt.subplots(figsize=(8, 5))
-ax.hist(tri[tri > 0], bins=100, color="#55A868", edgecolor="none", alpha=0.85)
-ax.axvline(0.5, color="red",    linestyle="--", linewidth=1.5, label=f"τ = 0.5 → {100*(tri>0.5).mean():.1f}% pairs")
-ax.axvline(0.7, color="orange", linestyle="--", linewidth=1.5, label=f"τ = 0.7 → {100*(tri>0.7).mean():.1f}% pairs")
-ax.axvline(0.8, color="purple", linestyle="--", linewidth=1.5, label=f"τ = 0.8 → {100*(tri>0.8).mean():.1f}% pairs")
-ax.set_xlabel("Pearson Correlation", fontsize=12)
-ax.set_ylabel("Number of Gene Pairs", fontsize=12)
-ax.set_title("Distribution of Positive Correlations\n(Threshold candidates shown)", fontsize=13)
-ax.legend(fontsize=10)
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x/1e6)}M"))
-plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/fig2_distribution_positive.png", dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved fig2_distribution_positive.png")
+def load_similarity_matrix(input_path: str | Path) -> pd.DataFrame:
+    input_path = Path(input_path)
+    logger.info("Loading similarity matrix from: %s", input_path)
+
+    if input_path.suffix.lower() == ".parquet":
+        sim = pd.read_parquet(input_path)
+    elif input_path.suffix.lower() in {".csv"}:
+        sim = pd.read_csv(input_path, index_col=0)
+    elif input_path.suffix.lower() in {".tsv", ".txt"}:
+        sim = pd.read_csv(input_path, sep="\t", index_col=0)
+    else:
+        raise ValueError(f"Unsupported file format: {input_path.suffix}")
+
+    logger.info("Loaded: %d genes x %d genes", sim.shape[0], sim.shape[1])
+    return sim
+
+
+def get_upper_triangle(sim: pd.DataFrame) -> np.ndarray:
+    """Extract upper triangle values (no diagonal)."""
+    vals = sim.values
+    return vals[np.triu_indices_from(vals, k=1)]
+
 
 # ══════════════════════════════════════════════════════
-# Figure 3: CDF
+# FIGURE 1: Distribution of Pairwise Correlations
 # ══════════════════════════════════════════════════════
-fig, ax = plt.subplots(figsize=(8, 5))
-sorted_tri = np.sort(tri)
-cdf = np.arange(1, len(sorted_tri) + 1) / len(sorted_tri)
-ax.plot(sorted_tri, cdf, color="#4C72B0", linewidth=1.5)
-ax.axvline(0.5, color="red",    linestyle="--", linewidth=1.2, label=f"τ=0.5 → {100*(tri>0.5).mean():.1f}% pairs retained")
-ax.axvline(0.7, color="orange", linestyle="--", linewidth=1.2, label=f"τ=0.7 → {100*(tri>0.7).mean():.1f}% pairs retained")
-ax.axvline(0.8, color="purple", linestyle="--", linewidth=1.2, label=f"τ=0.8 → {100*(tri>0.8).mean():.1f}% pairs retained")
-ax.set_xlabel("Pearson Correlation", fontsize=12)
-ax.set_ylabel("Cumulative Proportion of Pairs", fontsize=12)
-ax.set_title("Cumulative Distribution Function (CDF)", fontsize=13)
-ax.legend(fontsize=10)
-ax.grid(alpha=0.3)
-plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/fig3_cdf.png", dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved fig3_cdf.png")
+def plot_correlation_distribution(
+    sim: pd.DataFrame,
+    metric_name: str,
+    out_dir: Path,
+) -> None:
+    """
+    Plot histogram of all pairwise correlation values.
+    Justified by: Johnson & Krishnan (2022), Ballouz et al. (2015)
+    """
+    logger.info("Plotting correlation distribution...")
+    tri = get_upper_triangle(sim)
+    valid = tri[~np.isnan(tri)]
+
+    mean_val   = np.mean(valid)
+    median_val = np.median(valid)
+    std_val    = np.std(valid)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        f"{metric_name} — Distribution of Pairwise Correlations\n"
+        f"{sim.shape[0]:,} genes  |  {len(valid):,} gene pairs",
+        fontsize=13, fontweight="bold"
+    )
+
+    # Left: full distribution
+    ax = axes[0]
+    ax.hist(valid, bins=100, color=TEAL, edgecolor="none", alpha=0.85)
+    ax.axvline(mean_val,   color=RED,   linestyle="--", lw=1.5,
+               label=f"Mean = {mean_val:.3f}")
+    ax.axvline(median_val, color=AMBER, linestyle="--", lw=1.5,
+               label=f"Median = {median_val:.3f}")
+    ax.set_xlabel(f"{metric_name} Correlation", fontsize=11)
+    ax.set_ylabel("Number of Gene Pairs", fontsize=11)
+    ax.set_title("Full Distribution", fontsize=12)
+    ax.legend(fontsize=9)
+    ax.yaxis.set_major_formatter(
+        ticker.FuncFormatter(lambda x, _: f"{int(x/1e6)}M" if x >= 1e6 else f"{int(x/1e3)}K")
+    )
+
+    # Right: positive tail with threshold candidates
+    ax = axes[1]
+    pos = valid[valid > 0]
+    ax.hist(pos, bins=100, color=NAVY, edgecolor="none", alpha=0.85)
+    for tau, color, ls in [(0.5, RED, "--"), (0.7, AMBER, "--"), (0.8, GREEN, "--")]:
+        pct = 100 * (valid > tau).mean()
+        ax.axvline(tau, color=color, linestyle=ls, lw=1.5,
+                   label=f"τ={tau} → {pct:.1f}% pairs")
+    ax.set_xlabel(f"{metric_name} Correlation", fontsize=11)
+    ax.set_ylabel("Number of Gene Pairs", fontsize=11)
+    ax.set_title("Positive Tail — Threshold Candidates", fontsize=12)
+    ax.legend(fontsize=9)
+    ax.yaxis.set_major_formatter(
+        ticker.FuncFormatter(lambda x, _: f"{int(x/1e6)}M" if x >= 1e6 else f"{int(x/1e3)}K")
+    )
+
+    # Stats annotation
+    stats_text = (
+        f"n pairs = {len(valid):,}\n"
+        f"mean = {mean_val:.3f}\n"
+        f"median = {median_val:.3f}\n"
+        f"std = {std_val:.3f}\n"
+        f"min = {valid.min():.3f}\n"
+        f"max = {valid.max():.3f}"
+    )
+    axes[0].text(
+        0.02, 0.97, stats_text,
+        transform=axes[0].transAxes,
+        fontsize=8, verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+    )
+
+    plt.tight_layout()
+    out_path = out_dir / "fig1_correlation_distribution.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info("Saved → %s", out_path)
+
 
 # ══════════════════════════════════════════════════════
-# Figure 4: Network Density vs Hard Threshold
+# FIGURE 2: Gene-Gene Correlation Heatmap
 # ══════════════════════════════════════════════════════
-fig, ax = plt.subplots(figsize=(8, 5))
-thresholds = np.arange(0, 1.01, 0.01)
-pct_retained = [100 * (tri > t).mean() for t in thresholds]
-ax.plot(thresholds, pct_retained, color="#C44E52", linewidth=2)
-ax.axhline(5, color="red",    linestyle="--", linewidth=1.2, label="5% density")
-ax.axhline(1, color="orange", linestyle="--", linewidth=1.2, label="1% density")
-ax.fill_between(thresholds, pct_retained, 0,
-                where=[p <= 5 for p in pct_retained],
-                alpha=0.15, color="green", label="Target zone (1-5%)")
-ax.set_xlabel("Hard Threshold (τ)", fontsize=12)
-ax.set_ylabel("% of Pairs Retained", fontsize=12)
-ax.set_title("Network Density vs Hard Threshold\n(Target: 1–5% density)", fontsize=13)
-ax.legend(fontsize=10)
-ax.grid(alpha=0.3)
-ax.set_xlim(0, 1)
-ax.set_ylim(0, 100)
-plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/fig4_density_vs_threshold.png", dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved fig4_density_vs_threshold.png")
+def plot_gene_heatmap(
+    sim: pd.DataFrame,
+    metric_name: str,
+    out_dir: Path,
+    n_top: int = 100,
+) -> None:
+    """
+    Clustered gene-gene heatmap of top N most variable genes.
+    Justified by: Langfelder & Horvath (2008), Johnson & Krishnan (2022)
+    """
+    logger.info("Plotting gene-gene heatmap (top %d genes)...", n_top)
+
+    # Select top N genes by variance of their similarity scores
+    # Load expression matrix to get gene variances
+    expr = pd.read_csv("data/processed/preprocessed_counts.csv", index_col=0)
+    gene_std = expr.std(axis=1)
+    top_genes = gene_std.nlargest(n_top).index
+
+    # Then subset similarity matrix
+    sub = sim.loc[top_genes, top_genes]
+
+    fig = sns.clustermap(
+        sub,
+        cmap="RdBu_r",
+        center=0, vmin=-1, vmax=1,
+        xticklabels=False,
+        yticklabels=False,
+        figsize=(10, 10),
+        cbar_kws={"label": f"{metric_name} r", "shrink": 0.6},
+        dendrogram_ratio=0.12,
+        colors_ratio=0.02,
+    )
+    fig.ax_heatmap.set_title(
+        f"{metric_name} — Gene Co-Expression Heatmap\n"
+        f"Top {n_top} Most Variable Genes",
+        fontsize=13, pad=20
+    )
+    fig.ax_heatmap.set_xlabel("Genes", fontsize=11)
+    fig.ax_heatmap.set_ylabel("Genes", fontsize=11)
+
+    out_path = out_dir / "fig2_gene_heatmap.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info("Saved → %s", out_path)
+
 
 # ══════════════════════════════════════════════════════
-# Figure 5: Heatmap (Top 100 Variable Genes)
+# FIGURE 3: Scale-Free Topology Fit (Soft Thresholding)
 # ══════════════════════════════════════════════════════
-fig, ax = plt.subplots(figsize=(8, 7))
-gene_std = df.std(axis=1)
-top100 = gene_std.nlargest(100).index
-sub = df.loc[top100, top100]
-sns.heatmap(sub, ax=ax, cmap="RdBu_r", center=0, vmin=-1, vmax=1,
-            xticklabels=False, yticklabels=False,
-            cbar_kws={"label": "Pearson r", "shrink": 0.8})
-ax.set_title("Correlation Heatmap\n(Top 100 Most Variable Genes)", fontsize=13)
-ax.set_xlabel("Genes", fontsize=12)
-ax.set_ylabel("Genes", fontsize=12)
-plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/fig5_heatmap_top100.png", dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved fig5_heatmap_top100.png")
+def plot_scale_free_topology(
+    sim: pd.DataFrame,
+    metric_name: str,
+    out_dir: Path,
+    powers: list[int] | None = None,
+    r2_threshold: float = 0.80,
+) -> dict:
+    """
+    Plot scale-free topology R² and mean connectivity vs beta power.
+    Justified by: Zhang & Horvath (2005), Langfelder & Horvath (2008)
+
+    Returns dict with recommended beta power.
+    """
+    if powers is None:
+        powers = list(range(1, 21))
+
+    logger.info("Computing scale-free topology fit for %d powers...", len(powers))
+
+    # Use absolute values for signed hybrid network
+    abs_sim = sim.abs().values
+    np.fill_diagonal(abs_sim, 0)  # remove self-connections
+
+    results = []
+    for beta in powers:
+        logger.info("  Testing beta = %d...", beta)
+
+        # Apply soft threshold: raise to power beta
+        adj = abs_sim ** beta
+
+        # Connectivity = sum of edge weights per gene
+        k = adj.sum(axis=1)
+        mean_k = np.mean(k)
+
+        # Scale-free fit: log(P(k)) ~ log(k)
+        # Bin connectivity values and fit linear regression
+        k_nonzero = k[k > 0]
+        if len(k_nonzero) < 10:
+            results.append({"power": beta, "r2": 0.0, "slope": 0.0, "mean_k": mean_k})
+            continue
+
+        # Create histogram of connectivity
+        counts, bin_edges = np.histogram(k_nonzero, bins=20)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        # Keep only bins with non-zero counts
+        mask = counts > 0
+        if mask.sum() < 3:
+            results.append({"power": beta, "r2": 0.0, "slope": 0.0, "mean_k": mean_k})
+            continue
+
+        log_k  = np.log10(bin_centers[mask])
+        log_pk = np.log10(counts[mask] / counts[mask].sum())
+
+        # Linear regression
+        slope, intercept, r_value, p_value, se = stats.linregress(log_k, log_pk)
+        r2 = r_value ** 2
+
+        results.append({
+            "power":  beta,
+            "r2":     r2,
+            "slope":  slope,
+            "mean_k": mean_k
+        })
+
+    df_sft = pd.DataFrame(results)
+
+    # Find recommended power
+    above_threshold = df_sft[df_sft["r2"] >= r2_threshold]
+    if len(above_threshold) > 0:
+        recommended_power = int(above_threshold.iloc[0]["power"])
+        logger.info("Recommended soft threshold power: β = %d (R² = %.3f)",
+                    recommended_power,
+                    above_threshold.iloc[0]["r2"])
+    else:
+        recommended_power = int(df_sft.loc[df_sft["r2"].idxmax(), "power"])
+        logger.warning("R² never exceeded %.2f. Best power: β = %d (R² = %.3f)",
+                       r2_threshold, recommended_power,
+                       df_sft["r2"].max())
+
+    # Plot
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        f"{metric_name} — Scale-Free Topology Fit\n"
+        f"Recommended β = {recommended_power}  "
+        f"(R² threshold = {r2_threshold})",
+        fontsize=13, fontweight="bold"
+    )
+
+    # Left: R² vs power
+    ax = axes[0]
+    ax.plot(df_sft["power"], df_sft["r2"],
+            color=TEAL, marker="o", linewidth=2, markersize=6)
+    ax.axhline(r2_threshold, color=RED, linestyle="--", lw=1.5,
+               label=f"R² threshold = {r2_threshold}")
+    ax.axvline(recommended_power, color=NAVY, linestyle="--", lw=1.5,
+               label=f"Selected β = {recommended_power}")
+    ax.set_xlabel("Soft Threshold Power (β)", fontsize=11)
+    ax.set_ylabel("Scale-Free Topology Fit R²", fontsize=11)
+    ax.set_title("R² vs Soft Threshold Power", fontsize=12)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+
+    # Right: Mean connectivity vs power
+    ax = axes[1]
+    ax.plot(df_sft["power"], df_sft["mean_k"],
+            color=NAVY, marker="o", linewidth=2, markersize=6)
+    ax.axvline(recommended_power, color=RED, linestyle="--", lw=1.5,
+               label=f"Selected β = {recommended_power}")
+    ax.set_xlabel("Soft Threshold Power (β)", fontsize=11)
+    ax.set_ylabel("Mean Connectivity", fontsize=11)
+    ax.set_title("Mean Connectivity vs Soft Threshold Power", fontsize=12)
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+
+    # Annotate recommended point on both plots
+    r2_at_rec = df_sft.loc[df_sft["power"] == recommended_power, "r2"].values[0]
+    k_at_rec  = df_sft.loc[df_sft["power"] == recommended_power, "mean_k"].values[0]
+    axes[0].annotate(
+        f"β={recommended_power}\nR²={r2_at_rec:.3f}",
+        xy=(recommended_power, r2_at_rec),
+        xytext=(recommended_power + 1, r2_at_rec - 0.1),
+        fontsize=9, color=NAVY,
+        arrowprops=dict(arrowstyle="->", color=NAVY)
+    )
+    axes[1].annotate(
+        f"β={recommended_power}\nk={k_at_rec:.1f}",
+        xy=(recommended_power, k_at_rec),
+        xytext=(recommended_power + 1, k_at_rec + k_at_rec * 0.1),
+        fontsize=9, color=NAVY,
+        arrowprops=dict(arrowstyle="->", color=NAVY)
+    )
+
+    plt.tight_layout()
+    out_path = out_dir / "fig3_scale_free_topology.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info("Saved → %s", out_path)
+
+    # Save SFT table
+    table_path = out_dir / "sft_table.csv"
+    df_sft.to_csv(table_path, index=False)
+    logger.info("Saved SFT table → %s", table_path)
+
+    return {"recommended_power": recommended_power, "sft_table": df_sft}
+
 
 # ══════════════════════════════════════════════════════
-# Figure 6: Gene Pair Counts by Category
+# FIGURE 4: Network Density vs Hard Threshold
 # ══════════════════════════════════════════════════════
-fig, ax = plt.subplots(figsize=(8, 5))
-categories = ["> 0.8\n(Strong+)", "> 0.5\n(Moderate+)", "0 to 0.5\n(Weak+)", "< 0\n(Negative)"]
-counts = [
-    (tri > 0.8).sum(),
-    ((tri > 0.5) & (tri <= 0.8)).sum(),
-    ((tri > 0) & (tri <= 0.5)).sum(),
-    (tri < 0).sum()
-]
-colors = ["#2ecc71", "#3498db", "#95a5a6", "#e74c3c"]
-bars = ax.bar(categories, [c/1e6 for c in counts], color=colors, edgecolor="white", linewidth=0.5)
-for bar, count in zip(bars, counts):
-    pct = 100 * count / len(tri)
-    ax.text(bar.get_x() + bar.get_width()/2,
-            bar.get_height() + 0.3,
-            f"{pct:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
-ax.set_ylabel("Number of Gene Pairs (Millions)", fontsize=12)
-ax.set_title("Gene Pair Counts by Correlation Category", fontsize=13)
-ax.grid(axis="y", alpha=0.3)
-plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/fig6_pair_counts.png", dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved fig6_pair_counts.png")
+def plot_network_density(
+    sim: pd.DataFrame,
+    metric_name: str,
+    out_dir: Path,
+) -> dict:
+    """
+    Plot % pairs retained at each hard threshold τ.
+    Justified by: Perkins & Langston (2009), Bleker et al. (2024)
+    """
+    logger.info("Computing network density vs hard threshold...")
+    tri = get_upper_triangle(sim)
+    valid = tri[~np.isnan(tri)]
+    abs_valid = np.abs(valid)
 
-print(f"\nAll figures saved to {OUT_DIR}/")
+    thresholds = np.arange(0, 1.01, 0.01)
+    pct_retained = [100 * (abs_valid > t).mean() for t in thresholds]
+
+    # Build threshold table
+    table_rows = []
+    for tau in [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9]:
+        pct = 100 * (abs_valid > tau).mean()
+        n_edges = int((abs_valid > tau).sum())
+        table_rows.append({"tau": tau, "pct_retained": pct, "n_edges": n_edges})
+    df_table = pd.DataFrame(table_rows)
+
+    # Plot
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        f"{metric_name} — Network Density vs Hard Threshold",
+        fontsize=13, fontweight="bold"
+    )
+
+    # Left: full range
+    ax = axes[0]
+    ax.plot(thresholds, pct_retained, color=RED, linewidth=2)
+    ax.set_xlabel("Hard Threshold (τ)", fontsize=11)
+    ax.set_ylabel("% of Pairs Retained", fontsize=11)
+    ax.set_title("Network Density vs τ (Full Range)", fontsize=12)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 100)
+    ax.grid(alpha=0.3)
+
+    # Right: zoomed into 0.5–1.0 range
+    ax = axes[1]
+    mask = thresholds >= 0.5
+    ax.plot(thresholds[mask], np.array(pct_retained)[mask],
+            color=NAVY, linewidth=2)
+    ax.set_xlabel("Hard Threshold (τ)", fontsize=11)
+    ax.set_ylabel("% of Pairs Retained", fontsize=11)
+    ax.set_title("Network Density vs τ (Zoomed: 0.5–1.0)", fontsize=12)
+    ax.set_xlim(0.5, 1.0)
+    ax.grid(alpha=0.3)
+
+    # Add threshold table as text
+    table_str = "  τ    | % kept |   edges\n"
+    table_str += "-------|--------|--------\n"
+    for _, row in df_table.iterrows():
+        table_str += f" {row['tau']:.2f}  | {row['pct_retained']:5.2f}% | {int(row['n_edges']):,}\n"
+    axes[1].text(
+        0.97, 0.97, table_str,
+        transform=axes[1].transAxes,
+        fontsize=7.5, verticalalignment="top", horizontalalignment="right",
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9)
+    )
+
+    plt.tight_layout()
+    out_path = out_dir / "fig4_network_density.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info("Saved → %s", out_path)
+
+    # Save density table
+    table_path = out_dir / "density_table.csv"
+    df_table.to_csv(table_path, index=False)
+    logger.info("Saved density table → %s", table_path)
+
+    return {"density_table": df_table}
+# ══════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Visualize a gene co-expression similarity matrix."
+    )
+    parser.add_argument("--input",   required=True,
+                        help="Path to similarity matrix (CSV, TSV, or Parquet).")
+    parser.add_argument("--name",    required=True,
+                        help="Name of the metric e.g. Pearson, Spearman, Proportionality.")
+    parser.add_argument("--output",  required=True,
+                        help="Output directory for figures.")
+    parser.add_argument("--n-top",   type=int, default=100,
+                        help="Number of top variable genes for heatmap (default: 100).")
+    parser.add_argument("--powers",  type=int, nargs="+", default=list(range(1, 21)),
+                        help="Beta powers to test for scale-free topology (default: 1-20).")
+    parser.add_argument("--r2",      type=float, default=0.80,
+                        help="R² threshold for scale-free topology (default: 0.80).")
+    parser.add_argument("--density-min", type=float, default=0.01,
+                        help="Minimum target network density (default: 0.01 = 1%%).")
+    parser.add_argument("--density-max", type=float, default=0.05,
+                        help="Maximum target network density (default: 0.05 = 5%%).")
+    parser.add_argument("--skip-sft", action="store_true",
+                        help="Skip scale-free topology plot (slow for large matrices).")
+
+    args = parser.parse_args()
+    out_dir = Path(args.output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load
+    sim = load_similarity_matrix(args.input)
+
+    # Run all figures
+    plot_correlation_distribution(sim, args.name, out_dir)
+    plot_gene_heatmap(sim, args.name, out_dir, n_top=args.n_top)
+    plot_network_density(sim, args.name, out_dir)
+
+    if not args.skip_sft:
+        plot_scale_free_topology(sim, args.name, out_dir,
+                                 powers=args.powers,
+                                 r2_threshold=args.r2)
+
+    logger.info("All figures saved to: %s", out_dir)
+
+
+if __name__ == "__main__":
+    main()
