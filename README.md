@@ -119,3 +119,17 @@ python src/pearson.py
 **Note:** This may take several minutes. Output is a 17,578 × 17,578 matrix (~2 GB).
 
 ---
+
+---
+
+### Step 3 — Rho (Proportionality) Similarity Matrix
+```bash
+python src/proportionality.py 
+  --input data/processed/preprocessed_counts.csv \
+  --output data/similarity/pearson_similarity.csv
+```
+**Input:** `data/processed/preprocessed_counts.csv`  
+**Output:** `data/similarity/rho_similarity.csv`  
+**Note:** This may take several minutes. Output is a 17,578 × 17,578 matrix (~2 GB).
+
+---
