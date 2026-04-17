@@ -7,60 +7,71 @@ def calculate_proportionality(df):
     """
     Calculates the proportionality (rho) matrix for a gene expression dataframe.
     
+    Implements the proportionality correlation coefficient rho_p from:
+    Lovell et al. (2015) "Proportionality: A Valid Alternative to Correlation for Relative Data"
+    PLoS Computational Biology 11(3): e1004075
+    
+    Formula: rho_p(log x, log y) = 2*cov(clr(x), clr(y)) / (var(clr(x)) + var(clr(y)))
+    
     Expected format: 
     - Rows: Genes
     - Columns: Samples
+    
+    Note: Zero handling and CPM normalization should be applied BEFORE calling this function.
     """
-        
+    
     # 1. Centered Log-Ratio (CLR) Transformation
-    # We take the natural log of the dataframe.
+    # Take the natural log of the dataframe
     log_df = np.log(df)
     
-    # Calculate the mean of the logs for each sample (column). 
-    # skipna=True ensures we don't crash if a sample had a zero/NaN.
-    # Note: The mean of the logs is mathematically equivalent to the log of the geometric mean.
+    # Calculate the mean of the logs for each sample (column)
+    # mean(log(x)) == log(geometric_mean(x)) -- this is the CLR denominator
+    # axis=0 means we take the mean across genes for each sample
     log_geom_means = log_df.mean(axis=0, skipna=True)
     
-    # Subtract the log geometric mean from the log values (this is the clr transform)
+    # Subtract the log geometric mean from the log values (CLR transform)
+    # This ensures clr values sum to zero within each sample
     clr_df = log_df - log_geom_means
     
-    # 2. Covariance and Variance
-    # Transpose the clr_df so genes are columns, allowing us to get a Gene x Gene covariance matrix
-    # pandas .cov() automatically handles NaNs by computing pairwise covariance
+    # 2. Covariance Matrix
+    # Transpose so genes are columns -> gives Gene x Gene covariance matrix
+    # pandas .cov() handles NaNs by computing pairwise covariance
     cov_matrix = clr_df.T.cov()
     
-    # 3a. Extract the variance of each gene.
+    # 3. Variance of each gene
     # .var() matches the diagonal of the covariance matrix
     gene_variances = clr_df.T.var()
     
-    # 3b. Create a matrix of the sum of variances: var(clr(X)) + var(clr(Y))
-    # We use numpy broadcasting to create a Gene x Gene grid of these sums
+    # 4. Create matrix of variance sums: var(clr(X)) + var(clr(Y))
+    # numpy broadcasting creates a Gene x Gene grid
     v_array = gene_variances.values
     var_sum_matrix = pd.DataFrame(
-        v_array[:, None] + v_array[None, :], 
-        index=cov_matrix.index, 
+        v_array[:, None] + v_array[None, :],
+        index=cov_matrix.index,
         columns=cov_matrix.columns
     )
     
-    # 4. Calculate Rho
-    # rho = 2 * cov(X,Y) / (var(X) + var(Y))
+    # 5. Calculate Rho_p
+    # rho_p = 2 * cov(clr(X), clr(Y)) / (var(clr(X)) + var(clr(Y)))
+    # Ranges from -1 (perfect reciprocality) to +1 (perfect proportionality)
     rho_matrix = (2 * cov_matrix) / var_sum_matrix
     
     return rho_matrix
 
 
-# Execution Block
 if __name__ == "__main__":
     
-    # Set up command-line argument parsing
-    parser = argparse.ArgumentParser(description="Calculate Proportionality (Rho) Similarity Matrix")
-    parser.add_argument("--input", required=True, help="Path to preprocessed counts CSV")
+    parser = argparse.ArgumentParser(
+        description="Calculate Proportionality (Rho_p) Similarity Matrix. "
+                    "Implements Lovell et al. (2015) PLoS Comp Bio."
+    )
+    parser.add_argument("--input",  required=True, help="Path to counts CSV (raw or CTF-normalized)")
     parser.add_argument("--output", required=True, help="Path to save the similarity matrix CSV")
     args = parser.parse_args()
     
-    print(f"Input: {args.input}")
+    print(f"Input:  {args.input}")
     print(f"Output: {args.output}")
-    print("Note: This may take several minutes.")
+    print("Note: This may take several minutes for large matrices.")
     
     # 1. Read the CSV
     try:
@@ -68,66 +79,46 @@ if __name__ == "__main__":
     except FileNotFoundError:
         print(f"\nError: Could not find the file '{args.input}'. Please check the path.")
         exit(1)
-        
-    # 2. Reverse log1p and handle zeros simultaneously
-    # Since the input is ln(counts + 1), taking the exponent yields (counts + 1)
-    # This returns the data to linear space and applies a baseline pseudo-count of 1.
-    df_input = np.exp(df_input)
-        
-    # 3. Run the calculation
+    
+    print(f"Loaded matrix: {df_input.shape[0]:,} genes x {df_input.shape[1]:,} samples")
+    
+    # 2. Add pseudo-count BEFORE normalization
+    # Per Lovell et al. (2015): zeros are a known challenge in CoDA.
+    # Adding pseudo-count before CPM preserves scale-invariance of the CLR transform.
+    if (df_input == 0).any().any():
+        n_zeros = (df_input == 0).sum().sum()
+        warnings.warn(
+            f"{n_zeros:,} zeros detected. Applying pseudo-count of 1 before CPM normalization. "
+            "This preserves compositional ratios per CoDA principles.",
+            UserWarning
+        )
+        df_input = df_input + 1
+    
+    # 3. CPM normalization to prevent numerical overflow in log transform
+    # Dividing each sample by its library size preserves compositional ratios
+    # (scale invariance principle from CoDA -- Lovell et al. 2015, p.5)
+    print("Applying CPM normalization...")
+    df_input = df_input.divide(df_input.sum(axis=0), axis=1) * 1e6
+    
+    print(f"  Value range after CPM: [{df_input.values.min():.4f}, {df_input.values.max():.4f}]")
+    
+    # 4. Run the proportionality calculation
+    print("Computing CLR transform and rho_p matrix...")
     rho_matrix = calculate_proportionality(df_input)
     
-    # Get dimensions for the success message
-    rows, cols = rho_matrix.shape
+    # 5. Sanity check
+    n_nans = rho_matrix.isna().sum().sum()
+    if n_nans > 0:
+        warnings.warn(f"{n_nans:,} NaN values in output matrix. Check input data for issues.")
+    else:
+        print("  No NaN values detected in output matrix. ✓")
     
-    # 4. Export the output to a new CSV
+    print(f"  Rho range: [{rho_matrix.values[~np.isnan(rho_matrix.values)].min():.4f}, "
+          f"{rho_matrix.values[~np.isnan(rho_matrix.values)].max():.4f}]")
+    
+    # 6. Save
+    print(f"Saving to {args.output}...")
     rho_matrix.to_csv(args.output)
     
-    print(f"Success! Output is a {rows:,} × {cols:,} matrix.")
-
-    
-""" Test Data
-if __name__ == "__main__":
-    
-    print("--- Test 1: Highly Predictable (Perfect Proportionality) ---")
-    # Gene A and Gene B maintain an exact 1:2 ratio across all samples.
-    # Gene C is totally random.
-    df_perfect = pd.DataFrame({
-        'Sample_1': [10, 20, 15],
-        'Sample_2': [50, 100, 8],
-        'Sample_3': [30, 60, 42],
-        'Sample_4': [80, 160, 19]
-    }, index=['Gene_A', 'Gene_B', 'Gene_C'])
-    
-    print("Input:\n", df_perfect)
-    print("\nRho Matrix:\n", calculate_proportionality(df_perfect))
-    # Expectation: The intersection of Gene_A and Gene_B should be exactly 1.0
-
-
-    print("\n--- Test 2: Unconventional Scale Invariance ---")
-    # Gene X is expressed in the millions. Gene Y is expressed in fractions.
-    # However, their ratio across samples is perfectly constant.
-    df_scale = pd.DataFrame({
-        'Sample_1': [1000000, 0.01, 5],
-        'Sample_2': [2500000, 0.025, 6],
-        'Sample_3': [500000, 0.005, 4]
-    }, index=['Gene_X', 'Gene_Y', 'Gene_Z'])
-    
-    print("\nRho Matrix:\n", calculate_proportionality(df_scale))
-    # Expectation: Even with massive scale differences, Gene_X and Gene_Y will equal 1.0.
-
-
-    print("\n--- Test 3: Unconventional Zero Handling ---")
-    # Contains a zero. The script should throw a warning, convert to NaN, 
-    # and calculate the remaining pairwise data without crashing.
-    df_zeros = pd.DataFrame({
-        'Sample_1': [10, 20, 30],
-        'Sample_2': [5, 10, 0],  # The zero is here
-        'Sample_3': [100, 200, 300],
-        'Sample_4': [50, 100, 150]
-    }, index=['Gene_1', 'Gene_2', 'Gene_3'])
-    
-    print("\nRho Matrix:\n", calculate_proportionality(df_zeros))
-    # Expectation: A warning is printed. Gene_1 and Gene_2 still equal 1.0. 
-    # Gene_3 computes based only on Samples 1, 3, and 4.
-"""
+    rows, cols = rho_matrix.shape
+    print(f"Success! Output is a {rows:,} x {cols:,} matrix.")

@@ -439,8 +439,8 @@ def main() -> None:
                         help="Output directory for figures.")
     parser.add_argument("--n-top",   type=int, default=100,
                         help="Number of top variable genes for heatmap (default: 100).")
-    parser.add_argument("--powers",  type=int, nargs="+", default=list(range(1, 21)),
-                        help="Beta powers to test for scale-free topology (default: 1-20).")
+    parser.add_argument("--powers",  type=int, nargs="+", default=list(range(2, 21)),
+                        help="Beta powers to test for scale-free topology (default: 2-20).")
     parser.add_argument("--r2",      type=float, default=0.80,
                         help="R² threshold for scale-free topology (default: 0.80).")
     parser.add_argument("--density-min", type=float, default=0.01,

@@ -104,12 +104,16 @@ print("STEP 6: log1p transformation...")
 transformed_matrix = np.log1p(ctf_matrix)
 print("  log1p transformation done")
 
+
 # ══════════════════════════════════════════════════════
 # SAVE
 # ══════════════════════════════════════════════════════
 print("Saving...")
+# Save both versions in preprocessing
+ctf_matrix.to_csv(f"{OUT_DIR}/ctf_counts.csv")           # for proportionality
 transformed_matrix.to_csv(f"{OUT_DIR}/preprocessed_counts.csv")
 print(f"  → data/processed/preprocessed_counts.csv")
+
 print(f"\nFinal matrix: {transformed_matrix.shape[0]} genes × {transformed_matrix.shape[1]} samples")
 print("Preprocessing complete!")
 
